@@ -1,14 +1,18 @@
+from typing import Tuple
+
+import numpy as np
 import pandas as pd
 import seaborn as sns
 import matplotlib.pyplot as plt
 import missingno as msno
+from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.impute import SimpleImputer
 from sklearn.impute import KNNImputer
 from sklearn.experimental import enable_iterative_imputer
 from sklearn.impute import IterativeImputer
 from sklearn.preprocessing import MinMaxScaler, OrdinalEncoder
 from sklearn.preprocessing import StandardScaler
-from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
+from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score, confusion_matrix, classification_report
 
 
 def missing_table(data: pd.DataFrame):
@@ -21,13 +25,17 @@ def missing_table(data: pd.DataFrame):
     return statistics_missing_table
 
 
-def balance_table(data: pd.DataFrame, target_column):
+def balance_table(data: pd.DataFrame, target_column, show_visualization=False):
     balance_table = data.groupby(target_column).size().reset_index().rename(
         columns={target_column: "Class", 0: "Count"})
     tmp = (balance_table["Count"] / len(data) * 100).reset_index().rename(
         columns={target_column: "Class", "Count": "Percentage"})
     balance_table["Percentage"] = tmp["Percentage"]
     balance_table["Total"] = len(data)
+
+    if show_visualization:
+        sns.countplot(data, x=target_column)
+
     return balance_table
 
 
@@ -152,10 +160,12 @@ def ordinal_encode_data(data: pd.DataFrame, features_to_encode: list):
     return data_copy, encoders
 
 
-def scale_data(train, test, strategy="standard", features_to_scale=()):
+def scale_data(train, test, strategy="standard", features_to_scale=(), return_scaler=True, scaling_y=False) -> Tuple[
+    pd.DataFrame, pd.DataFrame, StandardScaler | MinMaxScaler | None]:
     train_copy = train.copy()
     test_copy = test.copy()
-    if len(features_to_scale) == 0:
+
+    if not scaling_y and len(features_to_scale) == 0:
         features_to_scale = get_numerical_features_names(train_copy)
 
     scaler = None
@@ -165,9 +175,19 @@ def scale_data(train, test, strategy="standard", features_to_scale=()):
     elif strategy == "minmax":
         scaler = MinMaxScaler()
 
-    scaler.fit(train_copy[features_to_scale])
-    train_copy[features_to_scale] = scaler.transform(train_copy[features_to_scale])
-    test_copy[features_to_scale] = scaler.transform(test_copy[features_to_scale])
+    if not scaling_y:
+        scaler.fit(train_copy[features_to_scale])
+        train_copy[features_to_scale] = scaler.transform(train_copy[features_to_scale])
+        test_copy[features_to_scale] = scaler.transform(test_copy[features_to_scale])
+    else:
+        scaler.fit(train_copy.values.reshape(-1, 1))
+        train_copy = pd.Series(data=(scaler.transform(train_copy.values.reshape(-1, 1))).flatten(),
+                               index=train_copy.index, name=train_copy.name)
+        test_copy = pd.Series(data=(scaler.transform(test_copy.values.reshape(-1, 1))).flatten(),
+                              index=test_copy.index, name=test_copy.name)
+
+    if return_scaler:
+        return train_copy, test_copy, scaler
 
     return train_copy, test_copy
 
@@ -238,3 +258,79 @@ def show_time_series_predicts(y_test, y_pred, figsize=(20, 10)):
     plt.plot(y_pred, label='predicted')
     plt.legend()
     plt.show()
+
+
+def balance_visualization(df: pd.DataFrame, target_column='target'):
+    sns.countplot(df, x=target_column)
+
+
+def pair_plot_ez(df: pd.DataFrame, features=None, target_column=None):
+    if features is None:
+        features = get_numerical_features_names(df)
+
+    if target_column is None:
+        sns.pairplot(df, vars=features)
+    else:
+        sns.pairplot(df, vars=features, hue=target_column)
+
+
+def classification_report_ez(y_true, y_pred, show_visualization=False, multiclass=False):
+    if multiclass:
+        predicted_classes = np.argmax(y_pred, axis=1)
+        true_classes = np.argmax(y_true, axis=1)
+        classification_report_ez(true_classes, predicted_classes, show_visualization=show_visualization)
+    else:
+        print(classification_report(y_true, y_pred))
+        if show_visualization:
+            cm = confusion_matrix(y_true, y_pred)
+            sns.heatmap(cm, annot=True, cmap="Blues", fmt="d", cbar=False)
+
+
+def get_x_and_y(df: pd.DataFrame, target_column='target'):
+    X = df.drop(columns=target_column)
+    Y = df[target_column]
+    return X, Y
+
+
+def train_history_visualization(history):
+    sns.lineplot(history.history['loss'], label='loss')
+    sns.lineplot(history.history['val_loss'], label='val_loss')
+
+
+def confusion_matrix_visualization(y_true, y_pred):
+    cm = confusion_matrix(y_true, y_pred)
+    sns.heatmap(cm, annot=True, cmap="Blues", fmt="d", cbar=False)
+
+
+def reshape_for_lstm(data: pd.DataFrame, lag: int):
+    data_copy = data.copy()
+    reshaped_data = data_copy.to_numpy().reshape(data_copy.shape[0], lag, data_copy.shape[1] // lag)
+    return reshaped_data
+
+def vectorize_text(corpus,strategy="binary"):
+
+    if strategy == "binary":
+        tv = TfidfVectorizer(binary=True, norm=None, use_idf=False, smooth_idf=False, lowercase=True,
+                             stop_words='english', token_pattern=r'(?u)\b[A-Za-z]+\b', min_df=1, max_df=1.0,
+                             max_features=None, ngram_range=(1, 1))
+        data = pd.DataFrame(tv.fit_transform(corpus).toarray(), columns=tv.get_feature_names_out())
+    elif strategy == "bow":
+        tv = TfidfVectorizer(binary=False, norm=None, use_idf=False, smooth_idf=False, lowercase=True,
+                             stop_words='english', token_pattern=r'(?u)\b[A-Za-z]+\b', min_df=1, max_df=1.0,
+                             max_features=None, ngram_range=(1, 1))
+
+        data = pd.DataFrame(tv.fit_transform(corpus).toarray(), columns=tv.get_feature_names_out())
+    elif strategy == "tf" or strategy == "l1":
+        tv = TfidfVectorizer(binary=False, norm='l1', use_idf=False, smooth_idf=False, lowercase=True,
+                             stop_words='english', token_pattern=r'(?u)\b[A-Za-z]+\b', min_df=1, max_df=1.0,
+                             max_features=None, ngram_range=(1, 1))
+
+        data = pd.DataFrame(tv.fit_transform(corpus).toarray(), columns=tv.get_feature_names_out())
+    else:
+        tv = TfidfVectorizer(binary=False, norm='l2', use_idf=False, smooth_idf=False, lowercase=True,
+                             stop_words='english', token_pattern=r'(?u)\b[A-Za-z]+\b', min_df=1, max_df=1.0,
+                             max_features=None, ngram_range=(1, 1))
+
+        data = pd.DataFrame(tv.fit_transform(corpus).toarray(), columns=tv.get_feature_names_out())
+
+    return data
